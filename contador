@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Package Counter – Full + Camera Scanner</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- ZXing barcode/QR library (UMD) -->
+  <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+</head>
+<body class="bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const nowISO = () => new Date().toISOString();
+    const persistKey = "pkgCounterFullV2";
+
+    function PackageCounter() {
+      const [sessionName, setSessionName] = useState("");
+      const [sender, setSender] = useState("");
+      const [count, setCount] = useState(0);
+      const [packages, setPackages] = useState([]);
+      const [note, setNote] = useState("");
+      const [scanning, setScanning] = useState(false);
+      const [continuousAdd, setContinuousAdd] = useState(true);
+      const [lastScan, setLastScan] = useState("");
+      const idRef = useRef(null);
+      const videoRef = useRef(null);
+      const codeReaderRef = useRef(null);
+      const lastScanAtRef = useRef(0);
+
+      // Load from localStorage
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem(persistKey);
+          if (raw) {
+            const s = JSON.parse(raw);
+            setSessionName(s.sessionName || "");
+            setSender(s.sender || "");
+            setCount(s.count || 0);
+            setPackages(s.packages || []);
+          }
+        } catch {}
+      }, []);
+
+      // Persist
+      useEffect(() => {
+        const s = { sessionName, sender, count, packages };
+        try { localStorage.setItem(persistKey, JSON.stringify(s)); } catch {}
+      }, [sessionName, sender, count, packages]);
+
+      // Sound
+      const beep = () => {
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'sine'; o.frequency.value = 880;
+          o.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.0001, ctx.currentTime);
+          g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.01);
+          o.start();
+          setTimeout(()=>{ g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.04); o.stop(ctx.currentTime + 0.06); }, 60);
+        } catch {}
+      };
+
+      // Counter ops
+      const inc = (id, note) => {
+        const pkg = { id: id || `#${packages.length + 1}`, note: note || "", sender: sender || "-", ts: nowISO() };
+        setPackages((arr) => [pkg, ...arr]);
+        setCount((c) => c + 1);
+        try { navigator.vibrate && navigator.vibrate(10); } catch {}
+        beep();
+      };
+      const dec = () => {
+        if (count === 0) return;
+        setPackages((arr) => arr.slice(1));
+        setCount((c) => Math.max(0, c - 1));
+      };
+      const reset = () => {
+        if (confirm("Reset session? This clears the counter and list.")) {
+          setCount(0); setPackages([]);
+        }
+      };
+
+      const onAddWithId = () => {
+        const id = idRef.current?.value?.trim();
+        if (!id) return;
+        inc(id, note);
+        idRef.current.value = ""; setNote("");
+      };
+
+      // ---------- Camera Scanner (ZXing) ----------
+      const startScanner = async () => {
+        if (scanning) return;
+        setScanning(true);
+        try {
+          const ZX = window.ZXing;
+          const codeReader = new ZX.BrowserMultiFormatReader();
+          codeReaderRef.current = codeReader;
+          const deviceId = (await codeReader.listVideoInputDevices())[0]?.deviceId;
+          await codeReader.decodeFromVideoDevice(deviceId, videoRef.current, (result, err) => {
+            if (result) {
+              const text = result.getText();
+              const now = Date.now();
+              if (now - lastScanAtRef.current > 600 || text !== lastScan) {
+                setLastScan(text);
+                lastScanAtRef.current = now;
+                if (continuousAdd) {
+                  inc(text, note);
+                } else {
+                  if (idRef.current) idRef.current.value = text;
+                }
+              }
+            }
+          });
+        } catch (e) {
+          alert('Camera error: ' + (e?.message || e));
+          setScanning(false);
+        }
+      };
+
+      const stopScanner = async () => {
+        try { await codeReaderRef.current?.reset(); } catch {}
+        const v = videoRef.current;
+        if (v && v.srcObject) {
+          try { v.srcObject.getTracks().forEach(t => t.stop()); } catch {}
+          v.srcObject = null;
+        }
+        setScanning(false);
+      };
+
+      useEffect(() => () => { stopScanner(); }, []);
+
+      return (
+        <div className="p-4 max-w-4xl mx-auto grid gap-4">
+          <h1 className="text-2xl font-bold">Package Counter – Scanner Enabled</h1>
+
+          <div className="bg-white p-4 rounded shadow">
+            <label className="block text-sm">Session</label>
+            <input className="border p-2 w-full mb-2" value={sessionName} onChange={e=>setSessionName(e.target.value)} placeholder="Session name" />
+            <label className="block text-sm">Sender</label>
+            <input className="border p-2 w-full" value={sender} onChange={e=>setSender(e.target.value)} placeholder="Sender" />
+          </div>
+
+          <div className="bg-white p-4 rounded shadow grid grid-cols-2 gap-2">
+            <button onClick={dec} className="bg-gray-200 p-4 text-xl rounded">-1</button>
+            <button onClick={()=>inc()} className="bg-blue-600 text-white p-4 text-xl rounded">+1</button>
+            <button onClick={reset} className="bg-red-500 text-white p-3 rounded col-span-2">Reset</button>
+          </div>
+
+          <div className="flex justify-between items-center">
+            <div>Total: <span className="font-bold">{count}</span></div>
+            <div>Sender: {sender || '–'}</div>
+          </div>
+
+          <div className="bg-white p-4 rounded shadow grid gap-2">
+            <div className="grid md:grid-cols-3 gap-2">
+              <input ref={idRef} placeholder="Scan or type package ID" className="border p-2" onKeyDown={(e)=>{if(e.key==='Enter')onAddWithId();}} />
+              <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Notes (optional)" className="border p-2 md:col-span-2" />
+            </div>
+            <div className="flex gap-2 items-center">
+              {!scanning ? (
+                <button onClick={startScanner} className="bg-emerald-500 text-white px-4 py-2 rounded">Start camera scan</button>
+              ) : (
+                <button onClick={stopScanner} className="bg-gray-700 text-white px-4 py-2 rounded">Stop camera</button>
+              )}
+              <label className="flex items-center gap-2 text-sm ml-auto">
+                <input type="checkbox" checked={continuousAdd} onChange={e=>setContinuousAdd(e.target.checked)} />
+                Auto +1 on every scan
+              </label>
+            </div>
+            {scanning && (
+              <div className="mt-3 grid gap-2">
+                <video ref={videoRef} className="w-full rounded border" muted playsInline></video>
+                <div className="text-xs text-gray-600">Last scan: <span className="font-mono">{lastScan || '—'}</span></div>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white p-4 rounded shadow">
+            <div className="flex justify-between mb-2">
+              <h2 className="font-bold">Packages ({packages.length})</h2>
+              <button onClick={() => {
+                const headers = ["session","sender","index","package_id","note","timestamp_iso"];
+                const rows = packages.slice().reverse().map((p,i)=>[
+                  sessionName, sender, i+1, p.id, p.note, p.ts
+                ]);
+                const csv = [headers.join(","), ...rows.map(r => r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(","))].join("
+");
+                const blob = new Blob([csv], {type:"text/csv"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = "packages.csv"; a.click();
+                URL.revokeObjectURL(url);
+              }} className="bg-gray-200 px-3 py-1 rounded">Export CSV</button>
+            </div>
+            {packages.length===0 ? <p className="text-sm text-gray-500">No packages yet</p> : (
+              <ul className="divide-y">
+                {packages.map(p=> (
+                  <li key={p.ts} className="py-1 text-sm">
+                    <span className="font-medium">{p.id}</span> – {p.note} <span className="text-gray-400">[{new Date(p.ts).toLocaleString()}]</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<PackageCounter/>);
+  </script>
+</body>
+</html>
